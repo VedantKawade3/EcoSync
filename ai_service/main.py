@@ -15,6 +15,7 @@ import numpy as np
 from fastapi import FastAPI, Header, HTTPException, status
 from PIL import Image
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 API_KEY = os.getenv("AI_SERVICE_KEY", "")
@@ -76,7 +77,9 @@ class InMemoryStore:
         return best
 
 
-DB_PATH = Path(os.getenv("AI_DATA_DIR", Path(__file__).resolve().parent / "data")) / "ai_vectors.db"
+# DB_PATH = Path(os.getenv("AI_DATA_DIR", Path(__file__).resolve().parent / "data")) / "ai_vectors.db"
+DATA_DIR = Path(os.getenv("AI_DATA_DIR", "/tmp/ai_data"))
+DB_PATH = DATA_DIR / "ai_vectors.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
