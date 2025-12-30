@@ -78,9 +78,19 @@ class InMemoryStore:
 
 
 # DB_PATH = Path(os.getenv("AI_DATA_DIR", Path(__file__).resolve().parent / "data")) / "ai_vectors.db"
-DATA_DIR = Path(os.getenv("AI_DATA_DIR", "/tmp/ai_data"))
+# DATA_DIR = Path(os.getenv("AI_DATA_DIR", "/tmp/ai_data"))
+# DB_PATH = DATA_DIR / "ai_vectors.db"
+# DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# ---- storage path (Leapcell-safe) ----
+_raw_dir = os.getenv("AI_DATA_DIR", "/tmp/ai_data")
+
+# Guardrail: Leapcell filesystem is read-only except /tmp
+if _raw_dir.startswith("/temp"):
+    _raw_dir = "/tmp/ai_data"
+
+DATA_DIR = Path(_raw_dir)
 DB_PATH = DATA_DIR / "ai_vectors.db"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 
 
 def get_conn() -> sqlite3.Connection:
