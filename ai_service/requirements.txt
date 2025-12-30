@@ -1,0 +1,9 @@
+fastapi==0.124.4
+uvicorn==0.38.0
+httpx==0.28.1
+Pillow==10.3.0
+imagehash==4.3.1
+numpy==1.26.4
+tensorflow
+tensorflow-hub==0.16.1
+starlette==0.50.0
