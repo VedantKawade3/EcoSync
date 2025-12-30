@@ -209,7 +209,7 @@ async def verify(payload: VerifyPayload, x_ai_key: Optional[str] = Header(defaul
         if dup:
             logger.info("Duplicate detected for post %s vs %s score=%.3f", post_id, dup["post_id"], dup["score"])
             return {
-                "status": "pending",
+                "status": "rejected",
                 "notes": f"Duplicate detected (mobilenet) similar to {dup['post_id']} (score {dup['score']:.3f})",
                 "credits_awarded": 0,
             }
