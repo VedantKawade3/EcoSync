@@ -409,6 +409,7 @@ def delete_post_record(post_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM posts WHERE id = %s", (post_id,))
             cur.execute("DELETE FROM embeddings WHERE post_id = %s", (post_id,))
+            cur.execute("DELETE FROM mobilenet_embeddings WHERE post_id = %s", (post_id,))
 
 
 def delete_lost_found_record(item_id: str) -> None:
