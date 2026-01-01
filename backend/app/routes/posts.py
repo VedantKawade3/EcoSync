@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth_utils import get_current_user, require_admin
-from ..ai_client import call_ai_service
+from ..ai_client import call_ai_service, delete_ai_embedding
 from ..config import Settings, get_settings
 from ..db import (
     add_post,
@@ -169,6 +169,7 @@ async def delete_post(
     post_id: str, settings: Settings = Depends(get_settings), current_user: dict = Depends(require_admin)
 ) -> None:
     delete_post_record(post_id)
+    await delete_ai_embedding(post_id)
 
 
 @router.post("/{post_id}/approve", response_model=Post)
