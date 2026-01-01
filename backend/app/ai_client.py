@@ -43,3 +43,19 @@ async def call_ai_service(media_bytes: bytes, user_id: str, post_id: str) -> Opt
             if attempt < attempts - 1:
                 await asyncio.sleep(2)
         return {"status": "pending", "notes": "Pending manual review (AI service unavailable)"}
+
+
+async def delete_ai_embedding(post_id: str) -> None:
+    if not AI_SERVICE_URL:
+        return
+    headers = {"X-AI-KEY": AI_SERVICE_KEY} if AI_SERVICE_KEY else {}
+    async with httpx.AsyncClient(timeout=AI_SERVICE_TIMEOUT) as client:
+        try:
+            resp = await client.delete(f"{AI_SERVICE_URL.rstrip('/')}/ai/embeddings/{post_id}", headers=headers)
+            logger.info(
+                "AI embedding delete status=%s body=%s",
+                resp.status_code,
+                resp.text[:200],
+            )
+        except Exception as exc:
+            logger.warning("AI embedding delete failed: %s", exc)
