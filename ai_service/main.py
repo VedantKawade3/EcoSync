@@ -355,3 +355,13 @@ def _db_health() -> Dict[str, str]:
         return {"status": "ok"}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
+
+
+@app.delete("/ai/embeddings/{post_id}")
+def delete_embedding(post_id: str, x_ai_key: Optional[str] = Header(default=None)) -> Dict[str, str | int]:
+    require_api_key(x_ai_key)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM embeddings WHERE post_id = %s", (post_id,))
+            deleted = cur.rowcount
+    return {"status": "ok", "deleted": int(deleted)}
