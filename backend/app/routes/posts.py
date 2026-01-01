@@ -168,6 +168,11 @@ async def create_post(
 async def delete_post(
     post_id: str, settings: Settings = Depends(get_settings), current_user: dict = Depends(require_admin)
 ) -> None:
+    existing = get_post(post_id)
+    if existing:
+        old_credits = int(existing.get("credits_awarded") or 0)
+        if old_credits:
+            adjust_credits(existing["user_id"], -old_credits)
     delete_post_record(post_id)
     await delete_ai_embedding(post_id)
 
