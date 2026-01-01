@@ -259,6 +259,8 @@ def update_post(post_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any
     fields = []
     values = []
     for key, value in updates.items():
+        if key == "verified":
+            value = 1 if bool(value) else 0
         fields.append(f"{key} = %s")
         values.append(value)
     values.append(post_id)
