@@ -4,17 +4,16 @@ from __future__ import annotations
 import base64
 import io
 import os
-import sqlite3
-from dataclasses import dataclass
 import logging
-from pathlib import Path
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 import imagehash
 import numpy as np
+import psycopg2
+from psycopg2 import sql
 from fastapi import FastAPI, Header, HTTPException, status
 from PIL import Image
-from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -77,25 +76,29 @@ class InMemoryStore:
         return best
 
 
-# DB_PATH = Path(os.getenv("AI_DATA_DIR", Path(__file__).resolve().parent / "data")) / "ai_vectors.db"
-# DATA_DIR = Path(os.getenv("AI_DATA_DIR", "/tmp/ai_data"))
-# DB_PATH = DATA_DIR / "ai_vectors.db"
-# DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-# ---- storage path (Leapcell-safe) ----
-_raw_dir = os.getenv("AI_DATA_DIR", "/tmp/ai_data")
+def _get_db_params() -> Tuple[str, str]:
+    dsn = os.getenv("AI_DATABASE_URL")
+    if not dsn:
+        host = os.getenv("AI_DB_HOST")
+        name = os.getenv("AI_DB_NAME")
+        user = os.getenv("AI_DB_USER")
+        password = os.getenv("AI_DB_PASSWORD")
+        port = os.getenv("AI_DB_PORT", "5432")
+        sslmode = os.getenv("AI_DB_SSLMODE", "require")
+        if not all([host, name, user, password]):
+            raise RuntimeError("Postgres env not configured (AI_DATABASE_URL or AI_DB_* vars required)")
+        dsn = f"host={host} port={port} dbname={name} user={user} password={password} sslmode={sslmode}"
+    schema = os.getenv("AI_DB_SCHEMA", "public")
+    return dsn, schema
 
-# Guardrail: Leapcell filesystem is read-only except /tmp
-if _raw_dir.startswith("/temp"):
-    _raw_dir = "/tmp/ai_data"
 
-DATA_DIR = Path(_raw_dir)
-DB_PATH = DATA_DIR / "ai_vectors.db"
-
-
-
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def get_conn():
+    dsn, schema = _get_db_params()
+    conn = psycopg2.connect(dsn)
+    if schema:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        conn.commit()
     return conn
 
 
@@ -105,12 +108,15 @@ def init_db() -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS embeddings (
-            user_id TEXT,
-            post_id TEXT,
-            kind TEXT, -- mobilenet or phash
-            vector BLOB
+            user_id TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            kind TEXT NOT NULL, -- mobilenet or phash
+            vector BYTEA NOT NULL
         );
         """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS embeddings_user_kind_idx ON embeddings (user_id, kind)"
     )
     conn.commit()
     conn.close()
@@ -121,8 +127,8 @@ def save_vector(user_id: str, post_id: str, kind: str, vec: np.ndarray) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO embeddings (user_id, post_id, kind, vector) VALUES (?, ?, ?, ?)",
-        (user_id, post_id, kind, vec32.tobytes()),
+        "INSERT INTO embeddings (user_id, post_id, kind, vector) VALUES (%s, %s, %s, %s)",
+        (user_id, post_id, kind, psycopg2.Binary(vec32.tobytes())),
     )
     conn.commit()
     conn.close()
@@ -131,11 +137,12 @@ def save_vector(user_id: str, post_id: str, kind: str, vec: np.ndarray) -> None:
 def search_vectors(user_id: str, vec: np.ndarray, kind: str, thresh: float) -> Optional[Dict]:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT post_id, vector FROM embeddings WHERE user_id = ? AND kind = ?", (user_id, kind))
+    cur.execute("SELECT post_id, vector FROM embeddings WHERE user_id = %s AND kind = %s", (user_id, kind))
     best = None
     best_score = 0.0
     for row in cur.fetchall():
-        stored = np.frombuffer(row["vector"], dtype=np.float32)
+        stored_bytes = bytes(row[1])
+        stored = np.frombuffer(stored_bytes, dtype=np.float32)
         if stored.shape != vec.shape:
             # Skip vectors from earlier runs with different dimensionality
             continue
@@ -143,7 +150,7 @@ def search_vectors(user_id: str, vec: np.ndarray, kind: str, thresh: float) -> O
         denom = float(np.linalg.norm(vec) * np.linalg.norm(stored) + 1e-9)
         score = num / denom
         if score > thresh and score > best_score:
-            best = {"post_id": row["post_id"], "score": score}
+            best = {"post_id": row[0], "score": score}
             best_score = score
     conn.close()
     return best
