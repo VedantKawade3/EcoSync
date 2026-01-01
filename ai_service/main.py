@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
-import os
 import logging
+import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -12,6 +15,7 @@ import imagehash
 import numpy as np
 import psycopg2
 from psycopg2 import sql
+from psycopg2 import pool as pg_pool
 from fastapi import FastAPI, Header, HTTPException, status
 from PIL import Image
 from starlette.middleware.cors import CORSMiddleware
@@ -37,7 +41,32 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup() -> None:
-    init_db()
+    logger.info("AI service starting up")
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    status_payload = {"status": "ok"}
+    db_status = _db_health()
+    status_payload["db"] = db_status["status"]
+    if "detail" in db_status:
+        status_payload["db_detail"] = db_status["detail"]
+    return status_payload
+
+
+@app.get("/health/db")
+def health_db() -> Dict[str, str]:
+    return _db_health()
+
+
+@app.get("/kaithhealthcheck")
+def kaith_healthcheck() -> Dict[str, str]:
+    return health()
+
+
+@app.get("/kaithheathcheck")
+def kaith_heathcheck() -> Dict[str, str]:
+    return health()
 
 
 def require_api_key(key: Optional[str]) -> None:
@@ -92,67 +121,140 @@ def _get_db_params() -> Tuple[str, str]:
     return dsn, schema
 
 
-def get_conn():
-    dsn, schema = _get_db_params()
-    conn = psycopg2.connect(dsn)
-    if schema:
-        with conn.cursor() as cur:
+AI_DB_POOL_MIN = int(os.getenv("AI_DB_POOL_MIN", "1"))
+AI_DB_POOL_MAX = int(os.getenv("AI_DB_POOL_MAX", "3"))
+AI_DB_CONNECT_TIMEOUT = int(os.getenv("AI_DB_CONNECT_TIMEOUT", "5"))
+AI_DB_STATEMENT_TIMEOUT_MS = int(os.getenv("AI_DB_STATEMENT_TIMEOUT_MS", "5000"))
+AI_DB_RETRIES = int(os.getenv("AI_DB_RETRIES", "2"))
+AI_DB_RETRY_SLEEP = float(os.getenv("AI_DB_RETRY_SLEEP", "0.5"))
+
+_pool = None
+_pool_lock = threading.Lock()
+_db_init_lock = threading.Lock()
+_db_initialized = False
+
+
+def _setup_conn(conn, schema: str) -> None:
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        if schema:
             cur.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
-        conn.commit()
-    return conn
+        cur.execute(sql.SQL("SET statement_timeout TO {}").format(sql.Literal(AI_DB_STATEMENT_TIMEOUT_MS)))
+
+
+def _get_pool():
+    global _pool
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
+        dsn, _schema = _get_db_params()
+        _pool = pg_pool.SimpleConnectionPool(
+            minconn=max(1, AI_DB_POOL_MIN),
+            maxconn=max(AI_DB_POOL_MIN, AI_DB_POOL_MAX),
+            dsn=dsn,
+            connect_timeout=AI_DB_CONNECT_TIMEOUT,
+        )
+        return _pool
+
+
+def _ensure_db_initialized(conn) -> None:
+    global _db_initialized
+    if _db_initialized:
+        return
+    with _db_init_lock:
+        if _db_initialized:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    user_id TEXT NOT NULL,
+                    post_id TEXT NOT NULL,
+                    kind TEXT NOT NULL, -- mobilenet or phash
+                    vector BYTEA NOT NULL
+                );
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS embeddings_user_kind_idx ON embeddings (user_id, kind)"
+            )
+        _db_initialized = True
+
+
+@contextlib.contextmanager
+def db_conn():
+    pool = _get_pool()
+    conn = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(max(1, AI_DB_RETRIES)):
+        try:
+            conn = pool.getconn()
+            if conn.closed:
+                pool.putconn(conn, close=True)
+                conn = None
+                raise RuntimeError("Database connection closed")
+            _setup_conn(conn, _get_db_params()[1])
+            _ensure_db_initialized(conn)
+            yield conn
+            return
+        except Exception as exc:
+            last_exc = exc
+            if conn is not None:
+                try:
+                    pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+                conn = None
+            if attempt < max(1, AI_DB_RETRIES) - 1:
+                time.sleep(AI_DB_RETRY_SLEEP)
+                continue
+            raise
+        finally:
+            if conn is not None:
+                pool.putconn(conn)
+                conn = None
+    if last_exc:
+        raise last_exc
 
 
 def init_db() -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS embeddings (
-            user_id TEXT NOT NULL,
-            post_id TEXT NOT NULL,
-            kind TEXT NOT NULL, -- mobilenet or phash
-            vector BYTEA NOT NULL
-        );
-        """
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS embeddings_user_kind_idx ON embeddings (user_id, kind)"
-    )
-    conn.commit()
-    conn.close()
+    with db_conn():
+        pass
 
 
 def save_vector(user_id: str, post_id: str, kind: str, vec: np.ndarray) -> None:
     vec32 = np.asarray(vec, dtype=np.float32)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO embeddings (user_id, post_id, kind, vector) VALUES (%s, %s, %s, %s)",
-        (user_id, post_id, kind, psycopg2.Binary(vec32.tobytes())),
-    )
-    conn.commit()
-    conn.close()
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO embeddings (user_id, post_id, kind, vector) VALUES (%s, %s, %s, %s)",
+                (user_id, post_id, kind, psycopg2.Binary(vec32.tobytes())),
+            )
 
 
 def search_vectors(user_id: str, vec: np.ndarray, kind: str, thresh: float) -> Optional[Dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT post_id, vector FROM embeddings WHERE user_id = %s AND kind = %s", (user_id, kind))
     best = None
     best_score = 0.0
-    for row in cur.fetchall():
-        stored_bytes = bytes(row[1])
-        stored = np.frombuffer(stored_bytes, dtype=np.float32)
-        if stored.shape != vec.shape:
-            # Skip vectors from earlier runs with different dimensionality
-            continue
-        num = float(np.dot(vec, stored))
-        denom = float(np.linalg.norm(vec) * np.linalg.norm(stored) + 1e-9)
-        score = num / denom
-        if score > thresh and score > best_score:
-            best = {"post_id": row[0], "score": score}
-            best_score = score
-    conn.close()
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT post_id, vector FROM embeddings WHERE user_id = %s AND kind = %s",
+                (user_id, kind),
+            )
+            for row in cur.fetchall():
+                stored_bytes = bytes(row[1])
+                stored = np.frombuffer(stored_bytes, dtype=np.float32)
+                if stored.shape != vec.shape:
+                    # Skip vectors from earlier runs with different dimensionality
+                    continue
+                num = float(np.dot(vec, stored))
+                denom = float(np.linalg.norm(vec) * np.linalg.norm(stored) + 1e-9)
+                score = num / denom
+                if score > thresh and score > best_score:
+                    best = {"post_id": row[0], "score": score}
+                    best_score = score
     return best
 
 
@@ -242,3 +344,14 @@ async def verify(payload: VerifyPayload, x_ai_key: Optional[str] = Header(defaul
 
     logger.warning("No MobileNet embedding produced for post %s; returning pending", post_id)
     return {"status": "pending", "notes": "Pending manual review", "credits_awarded": 0}
+
+
+def _db_health() -> Dict[str, str]:
+    try:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
