@@ -7,6 +7,7 @@ from .config import get_settings
 from .db import init_db
 from .routes import ai, auth, lost_found, posts, rewards, user_settings
 from .schemas import HealthResponse
+from .db import db_conn
 
 settings = get_settings()
 
@@ -29,6 +30,18 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health() -> HealthResponse:
     return HealthResponse()
+
+
+@app.get("/health/db", tags=["health"])
+async def health_db() -> dict:
+    try:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
 
 
 app.include_router(posts.router)
