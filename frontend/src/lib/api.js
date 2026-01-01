@@ -141,7 +141,7 @@ export const deleteLostItem = async (itemId) => {
 export const redeemCredits = async (payload) => {
   const res = await fetch(`${API_BASE}/rewards/redeem`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
   });
   return handleResponse(res);
